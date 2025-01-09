@@ -1,8 +1,10 @@
 
 from modules.util.config.TrainConfig import TrainConfig
+from modules.zluda.ZLUDAHijacks import do_hijack
 
 import torch
 from torch._prims_common import DeviceLikeType
+import onnxruntime as ort
 
 
 def is_zluda(device: DeviceLikeType):
@@ -25,12 +27,18 @@ def test(device: DeviceLikeType) -> Exception | None:
 
 
 def initialize():
+    do_hijack()
+
     torch.backends.cudnn.enabled = False
     torch.backends.cuda.enable_flash_sdp(False)
     torch.backends.cuda.enable_math_sdp(True)
     torch.backends.cuda.enable_mem_efficient_sdp(False)
     if hasattr(torch.backends.cuda, "enable_cudnn_sdp"):
         torch.backends.cuda.enable_cudnn_sdp(False)
+
+    # ONNX Runtime is not supported
+    ort.capi._pybind_state.get_available_providers = lambda: [v for v in ort.get_available_providers() if v != "CUDAExecutionProvider"] # pylint: disable=protected-access
+    ort.get_available_providers = ort.capi._pybind_state.get_available_providers # pylint: disable=protected-access
 
 
 def initialize_devices(config: TrainConfig):
