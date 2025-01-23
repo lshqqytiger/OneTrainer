@@ -18,12 +18,10 @@ def script_imports(allow_zluda: bool = True):
     if allow_zluda and sys.platform.startswith('win'):
         from modules.zluda import ZLUDAInstaller
 
-        zluda_path = ZLUDAInstaller.get_path()
-
-        if os.path.exists(zluda_path):
+        if os.path.exists(ZLUDAInstaller.path):
             try:
-                ZLUDAInstaller.load(zluda_path)
-                print(f'Using ZLUDA in {zluda_path}')
+                ZLUDAInstaller.load()
+                print(f'Using ZLUDA in {ZLUDAInstaller.path}')
             except Exception as e:
                 print(f'Failed to load ZLUDA: {e}')
 
