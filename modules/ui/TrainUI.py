@@ -416,7 +416,7 @@ class TrainUI(ctk.CTk):
 
         # token count
         components.label(frame, 1, 0, "Token count",
-                         tooltip="The token count used when creating a new embedding")
+                         tooltip="The token count used when creating a new embedding. Leave empty to auto detect from the initial embedding text.")
         components.entry(frame, 1, 1, self.ui_state, "embedding.token_count")
 
         # initial embedding text
@@ -615,12 +615,8 @@ class TrainUI(ctk.CTk):
         ], initialdir=".", initialfile="config.json")
 
         if file_path:
-            config_dict=self.train_config.to_pack_dict()
-            if 'secrets' in config_dict:
-                config_dict.pop('secrets')
-
             with open(file_path, "w") as f:
-                json.dump(config_dict, f, indent=4)
+                json.dump(self.train_config.to_pack_dict(secrets=False), f, indent=4)
 
     def sample_now(self):
         train_commands = self.training_commands
