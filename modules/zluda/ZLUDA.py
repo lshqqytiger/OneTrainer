@@ -1,10 +1,16 @@
+import sys
 
 from modules.util.config.TrainConfig import TrainConfig
-from modules.zluda.ZLUDAHijacks import do_hijack
+from modules.zluda import ZLUDAInstaller
+from modules.zluda.ZLUDAInstaller import core, default_agent  # noqa: F401
 
 import torch
 from torch._prims_common import DeviceLikeType
+
 import onnxruntime as ort
+
+PLATFORM = sys.platform
+do_nothing = lambda _: None  # noqa: E731
 
 
 def is_zluda(device: DeviceLikeType):
@@ -27,14 +33,17 @@ def test(device: DeviceLikeType) -> Exception | None:
 
 
 def initialize():
-    do_hijack()
-
-    torch.backends.cudnn.enabled = False
-    torch.backends.cuda.enable_flash_sdp(False)
-    torch.backends.cuda.enable_math_sdp(True)
-    torch.backends.cuda.enable_mem_efficient_sdp(False)
+    torch.backends.cudnn.enabled = ZLUDAInstaller.MIOpen_enabled
     if hasattr(torch.backends.cuda, "enable_cudnn_sdp"):
-        torch.backends.cuda.enable_cudnn_sdp(False)
+        if not ZLUDAInstaller.MIOpen_enabled:
+            torch.backends.cuda.enable_cudnn_sdp(False)
+            torch.backends.cuda.enable_cudnn_sdp = do_nothing
+    else:
+        torch.backends.cuda.enable_cudnn_sdp = do_nothing
+    torch.backends.cuda.enable_flash_sdp(False)
+    torch.backends.cuda.enable_flash_sdp = torch.backends.cuda.enable_cudnn_sdp
+    torch.backends.cuda.enable_mem_efficient_sdp(False)
+    torch.backends.cuda.enable_mem_efficient_sdp = do_nothing
 
     # ONNX Runtime is not supported
     ort.capi._pybind_state.get_available_providers = lambda: [v for v in ort.get_available_providers() if v != "CUDAExecutionProvider"] # pylint: disable=protected-access

@@ -17,10 +17,22 @@ def script_imports(allow_zluda: bool = True):
     sys.path.insert(0, str(onetrainer_lib_path))
 
     if allow_zluda and sys.platform.startswith('win'):
-        from modules.zluda import ZLUDAInstaller
+        from modules.zluda import ROCm, ZLUDAInstaller
 
         if os.path.exists(ZLUDAInstaller.path):
+            amd_gpus = ROCm.get_agents()
+            if len(amd_gpus) == 0:
+                print('No AMD GPU found, skipping ZLUDA load')
+                return
+            index = 0
+            for idx, gpu in enumerate(amd_gpus):
+                index = idx
+                if not gpu.is_apu:
+                    # although apu was found, there can be a dedicated card. do not break loop.
+                    # if no dedicated card was found, apu will be used.
+                    break
             try:
+                ZLUDAInstaller.set_default_agent(amd_gpus[index])
                 ZLUDAInstaller.load()
                 print(f'Using ZLUDA in {ZLUDAInstaller.path}')
             except Exception as e:

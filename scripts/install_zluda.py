@@ -9,7 +9,6 @@ from modules.zluda import ZLUDAInstaller
 if __name__ == '__main__':
     try:
         ZLUDAInstaller.install()
-        ZLUDAInstaller.make_copy()
     except Exception as e:
         print(f'Failed to install ZLUDA: {e}')
         sys.exit(1)
