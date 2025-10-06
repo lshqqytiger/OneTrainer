@@ -44,11 +44,9 @@ class StableDiffusion3Sampler(BaseModelSampler):
             diffusion_steps: int,
             cfg_scale: float,
             noise_scheduler: NoiseScheduler,
-            cfg_rescale: float = 0.7,
             text_encoder_1_layer_skip: int = 0,
             text_encoder_2_layer_skip: int = 0,
             text_encoder_3_layer_skip: int = 0,
-            force_last_timestep: bool = False,
             prior_attention_mask: bool = False,
             on_update_progress: Callable[[int, int], None] = lambda _, __: None,
     ) -> ModelSamplerOutput:
@@ -68,25 +66,25 @@ class StableDiffusion3Sampler(BaseModelSampler):
             # prepare prompt
             self.model.text_encoder_to(self.train_device)
 
-            prompt_embedding, pooled_prompt_embedding = self.model.encode_text(
-                text=prompt,
-                train_device=self.train_device,
-                batch_size=1,
-                text_encoder_1_layer_skip=text_encoder_1_layer_skip,
-                text_encoder_2_layer_skip=text_encoder_2_layer_skip,
-                text_encoder_3_layer_skip=text_encoder_3_layer_skip,
-                apply_attention_mask=prior_attention_mask,
-            )
+            prompt_embedding, pooled_prompt_embedding = self.model.combine_text_encoder_output(
+                *self.model.encode_text(
+                    text=prompt,
+                    train_device=self.train_device,
+                    text_encoder_1_layer_skip=text_encoder_1_layer_skip,
+                    text_encoder_2_layer_skip=text_encoder_2_layer_skip,
+                    text_encoder_3_layer_skip=text_encoder_3_layer_skip,
+                    apply_attention_mask=prior_attention_mask,
+                ))
 
-            negative_prompt_embedding, negative_pooled_prompt_embedding = self.model.encode_text(
-                text=negative_prompt,
-                train_device=self.train_device,
-                batch_size=1,
-                text_encoder_1_layer_skip=text_encoder_1_layer_skip,
-                text_encoder_2_layer_skip=text_encoder_2_layer_skip,
-                text_encoder_3_layer_skip=text_encoder_3_layer_skip,
-                apply_attention_mask=prior_attention_mask,
-            )
+            negative_prompt_embedding, negative_pooled_prompt_embedding = self.model.combine_text_encoder_output(
+                *self.model.encode_text(
+                    text=negative_prompt,
+                    train_device=self.train_device,
+                    text_encoder_1_layer_skip=text_encoder_1_layer_skip,
+                    text_encoder_2_layer_skip=text_encoder_2_layer_skip,
+                    text_encoder_3_layer_skip=text_encoder_3_layer_skip,
+                    apply_attention_mask=prior_attention_mask,
+                ))
 
             combined_prompt_embedding = torch.cat([negative_prompt_embedding, prompt_embedding], dim=0)
             combined_pooled_prompt_embedding = torch.cat(
@@ -98,13 +96,6 @@ class StableDiffusion3Sampler(BaseModelSampler):
             # prepare timesteps
             noise_scheduler.set_timesteps(diffusion_steps, device=self.train_device)
             timesteps = noise_scheduler.timesteps
-
-            if force_last_timestep:
-                last_timestep = torch.ones(1, device=self.train_device, dtype=torch.int64) \
-                                * (noise_scheduler.config.num_train_timesteps - 1)
-
-                # add the final timestep to force predicting with zero snr
-                timesteps = torch.cat([last_timestep, timesteps])
 
             # prepare latent image
             num_channels_latents = transformer.config.in_channels
@@ -138,16 +129,6 @@ class StableDiffusion3Sampler(BaseModelSampler):
                 # cfg
                 noise_pred_negative, noise_pred_positive = noise_pred.chunk(2)
                 noise_pred = noise_pred_negative + cfg_scale * (noise_pred_positive - noise_pred_negative)
-
-                # TODO: Verify this is still valid for SD3.
-                if cfg_rescale > 0.0:
-                    # From: Common Diffusion Noise Schedules and Sample Steps are Flawed (https://arxiv.org/abs/2305.08891)
-                    std_positive = noise_pred_positive.std(dim=list(range(1, noise_pred_positive.ndim)), keepdim=True)
-                    std_pred = noise_pred.std(dim=list(range(1, noise_pred.ndim)), keepdim=True)
-                    noise_pred_rescaled = noise_pred * (std_positive / std_pred)
-                    noise_pred = (
-                            cfg_rescale * noise_pred_rescaled + (1 - cfg_rescale) * noise_pred
-                    )
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latent_image = noise_scheduler.step(
@@ -186,12 +167,9 @@ class StableDiffusion3Sampler(BaseModelSampler):
             on_sample: Callable[[ModelSamplerOutput], None] = lambda _: None,
             on_update_progress: Callable[[int, int], None] = lambda _, __: None,
     ):
-        prompt = self.model.add_embeddings_to_prompt(sample_config.prompt)
-        negative_prompt = self.model.add_embeddings_to_prompt(sample_config.negative_prompt)
-
         sampler_output = self.__sample_base(
-            prompt=prompt,
-            negative_prompt=negative_prompt,
+            prompt=sample_config.prompt,
+            negative_prompt=sample_config.negative_prompt,
             height=self.quantize_resolution(sample_config.height, 16),
             width=self.quantize_resolution(sample_config.width, 16),
             seed=sample_config.seed,
@@ -199,11 +177,9 @@ class StableDiffusion3Sampler(BaseModelSampler):
             diffusion_steps=sample_config.diffusion_steps,
             cfg_scale=sample_config.cfg_scale,
             noise_scheduler=sample_config.noise_scheduler,
-            cfg_rescale=0.7 if sample_config.force_last_timestep else 0.0,
             text_encoder_1_layer_skip=sample_config.text_encoder_1_layer_skip,
             text_encoder_2_layer_skip=sample_config.text_encoder_2_layer_skip,
             text_encoder_3_layer_skip=sample_config.text_encoder_3_layer_skip,
-            force_last_timestep=sample_config.force_last_timestep,
             prior_attention_mask=sample_config.prior_attention_mask,
             on_update_progress=on_update_progress,
         )

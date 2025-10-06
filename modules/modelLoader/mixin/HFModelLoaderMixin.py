@@ -1,5 +1,7 @@
 import json
 import os
+import re
+import traceback
 from abc import ABCMeta
 from itertools import repeat
 
@@ -21,6 +23,8 @@ from safetensors.torch import load_file
 
 
 class HFModelLoaderMixin(metaclass=ABCMeta):
+    def __init__(self):
+        super().__init__()
 
     def __load_sub_module(
             self,
@@ -113,8 +117,21 @@ class HFModelLoaderMixin(metaclass=ABCMeta):
             for f in full_filenames:
                 state_dict |= load_file(f)
 
-        if hasattr(sub_module, '_convert_deprecated_attention_blocks'):
-            sub_module._convert_deprecated_attention_blocks(state_dict)
+        if hasattr(sub_module, '_fix_state_dict_keys_on_load'):
+            sub_module._fix_state_dict_keys_on_load(state_dict)
+
+        #TODO why is it necessary to iterate by key names from the state dict?
+        #why not iterate through the object model, like replace_linear_... does?
+        #would avoid key replacements as follows.
+
+        if hasattr(sub_module, "_checkpoint_conversion_mapping"): #required for loading the text encoder of Qwen
+            new_state_dict = {}
+            for k, v in state_dict.items():
+                new_k = k
+                for pattern, replacement in sub_module._checkpoint_conversion_mapping.items():
+                    new_k = re.sub(pattern, replacement, new_k)
+                new_state_dict[new_k] = v
+            state_dict = new_state_dict
 
         for key, value in state_dict.items():
             module = sub_module
@@ -156,7 +173,7 @@ class HFModelLoaderMixin(metaclass=ABCMeta):
             dtype: DataType,
             train_dtype: DataType,
             pretrained_model_name_or_path: str,
-            subfolder: str | None = None,
+            subfolder: str = "",
     ):
         user_agent = {
             "file_type": "model",
@@ -212,7 +229,7 @@ class HFModelLoaderMixin(metaclass=ABCMeta):
             sub_module=sub_module,
             dtype=dtype,
             train_dtype=train_dtype,
-            keep_in_fp32_modules=None,
+            keep_in_fp32_modules=module_type._keep_in_fp32_modules,
             pretrained_model_name_or_path=pretrained_model_name_or_path,
             subfolder=subfolder,
             model_filename="diffusion_pytorch_model.safetensors",
@@ -286,3 +303,22 @@ class HFModelLoaderMixin(metaclass=ABCMeta):
             train_dtype,
             None,
         )
+
+    def _prepare_sub_modules(self, pretrained_model_name_or_path: str, diffusers_modules: list[str], transformers_modules: list[str]):
+        is_local = os.path.isdir(pretrained_model_name_or_path)
+        if is_local:
+            return
+
+        diffusers_paths = [((folder + "/") if folder else "") + "diffusion_pytorch_model*" for folder in diffusers_modules]
+        transformers_paths = [((folder + "/") if folder else "") + "model*" for folder in transformers_modules]
+        transformers_paths.extend([((folder + "/") if folder else "") + "pytorch_model*" for folder in transformers_modules])
+        try:
+            huggingface_hub.snapshot_download(
+                pretrained_model_name_or_path,
+                allow_patterns=diffusers_paths + transformers_paths,
+            )
+        except huggingface_hub.errors.HFValidationError:
+            pass
+        except Exception:
+            traceback.print_exc()
+            print("Error during bulk preloading of Huggingface model repository, proceeding without preloading")

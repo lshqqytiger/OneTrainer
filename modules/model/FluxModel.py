@@ -1,3 +1,4 @@
+import math
 from contextlib import nullcontext
 from random import Random
 
@@ -23,23 +24,28 @@ from diffusers import (
 from transformers import CLIPTextModel, CLIPTokenizer, T5EncoderModel, T5Tokenizer
 
 
-class FluxModelEmbedding(BaseModelEmbedding):
+class FluxModelEmbedding:
     def __init__(
             self,
             uuid: str,
-            text_encoder_1_vector: Tensor,
-            text_encoder_2_vector: Tensor,
+            text_encoder_1_vector: Tensor | None,
+            text_encoder_2_vector: Tensor | None,
             placeholder: str,
+            is_output_embedding: bool,
     ):
-        super().__init__(
+        self.text_encoder_1_embedding = BaseModelEmbedding(
             uuid=uuid,
-            token_count=text_encoder_1_vector.shape[0],
             placeholder=placeholder,
+            vector=text_encoder_1_vector,
+            is_output_embedding=False,
         )
 
-        self.text_encoder_1_vector = text_encoder_1_vector
-        self.text_encoder_2_vector = text_encoder_2_vector
-
+        self.text_encoder_2_embedding = BaseModelEmbedding(
+            uuid=uuid,
+            placeholder=placeholder,
+            vector=text_encoder_2_vector,
+            is_output_embedding=is_output_embedding,
+        )
 
 class FluxModel(BaseModel):
     # base model data
@@ -52,10 +58,8 @@ class FluxModel(BaseModel):
     transformer: FluxTransformer2DModel | None
 
     # autocast context
-    autocast_context: torch.autocast | nullcontext
     text_encoder_2_autocast_context: torch.autocast | nullcontext
 
-    train_dtype: DataType
     text_encoder_2_train_dtype: DataType
 
     text_encoder_2_offload_conductor: LayerOffloadConductor | None
@@ -63,9 +67,7 @@ class FluxModel(BaseModel):
 
     # persistent embedding training data
     embedding: FluxModelEmbedding | None
-    embedding_state: tuple[Tensor, Tensor] | None
     additional_embeddings: list[FluxModelEmbedding] | None
-    additional_embedding_states: list[tuple[Tensor, Tensor] | None]
     embedding_wrapper_1: AdditionalEmbeddingWrapper | None
     embedding_wrapper_2: AdditionalEmbeddingWrapper | None
 
@@ -74,9 +76,6 @@ class FluxModel(BaseModel):
     text_encoder_2_lora: LoRAModuleWrapper | None
     transformer_lora: LoRAModuleWrapper | None
     lora_state_dict: dict | None
-
-    sd_config: dict | None
-    sd_config_filename: str | None
 
     def __init__(
             self,
@@ -94,19 +93,15 @@ class FluxModel(BaseModel):
         self.vae = None
         self.transformer = None
 
-        self.autocast_context = nullcontext()
         self.text_encoder_2_autocast_context = nullcontext()
 
-        self.train_dtype = DataType.FLOAT_32
         self.text_encoder_2_train_dtype = DataType.FLOAT_32
 
         self.text_encoder_2_offload_conductor = None
         self.transformer_offload_conductor = None
 
         self.embedding = None
-        self.embedding_state = None
         self.additional_embeddings = []
-        self.additional_embedding_states = []
         self.embedding_wrapper_1 = None
         self.embedding_wrapper_2 = None
 
@@ -114,6 +109,25 @@ class FluxModel(BaseModel):
         self.text_encoder_2_lora = None
         self.transformer_lora = None
         self.lora_state_dict = None
+
+    def adapters(self) -> list[LoRAModuleWrapper]:
+        return [a for a in [
+            self.text_encoder_1_lora,
+            self.text_encoder_2_lora,
+            self.transformer_lora,
+        ] if a is not None]
+
+    def all_embeddings(self) -> list[FluxModelEmbedding]:
+        return self.additional_embeddings \
+               + ([self.embedding] if self.embedding is not None else [])
+
+    def all_text_encoder_1_embeddings(self) -> list[BaseModelEmbedding]:
+        return [embedding.text_encoder_1_embedding for embedding in self.additional_embeddings] \
+               + ([self.embedding.text_encoder_1_embedding] if self.embedding is not None else [])
+
+    def all_text_encoder_2_embeddings(self) -> list[BaseModelEmbedding]:
+        return [embedding.text_encoder_2_embedding for embedding in self.additional_embeddings] \
+               + ([self.embedding.text_encoder_2_embedding] if self.embedding is not None else [])
 
     def vae_to(self, device: torch.device):
         self.vae.to(device=device)
@@ -174,13 +188,16 @@ class FluxModel(BaseModel):
             tokenizer_2=self.tokenizer_2,
         )
 
-    def add_embeddings_to_prompt(self, prompt: str) -> str:
-        return self._add_embeddings_to_prompt(self.additional_embeddings, self.embedding, prompt)
+    def add_text_encoder_1_embeddings_to_prompt(self, prompt: str) -> str:
+        return self._add_embeddings_to_prompt(self.all_text_encoder_1_embeddings(), prompt)
+
+    def add_text_encoder_2_embeddings_to_prompt(self, prompt: str) -> str:
+        return self._add_embeddings_to_prompt(self.all_text_encoder_2_embeddings(), prompt)
 
     def encode_text(
             self,
             train_device: torch.device,
-            batch_size: int,
+            batch_size: int = 1,
             rand: Random | None = None,
             text: str = None,
             tokens_1: Tensor = None,
@@ -197,7 +214,7 @@ class FluxModel(BaseModel):
         # tokenize prompt
         if tokens_1 is None and text is not None and self.tokenizer_1 is not None:
             tokenizer_output = self.tokenizer_1(
-                text,
+                self.add_text_encoder_1_embeddings_to_prompt(text),
                 padding='max_length',
                 truncation=True,
                 max_length=77,
@@ -207,7 +224,7 @@ class FluxModel(BaseModel):
 
         if tokens_2 is None and text is not None and self.tokenizer_2 is not None:
             tokenizer_output = self.tokenizer_2(
-                text,
+                self.add_text_encoder_2_embeddings_to_prompt(text),
                 padding='max_length',
                 truncation=True,
                 max_length=77,
@@ -259,6 +276,13 @@ class FluxModel(BaseModel):
         if apply_attention_mask:
             text_encoder_2_output = text_encoder_2_output * tokens_mask_2[:, :, None]
 
+        text_encoder_2_output = self._apply_output_embeddings(
+            self.all_text_encoder_2_embeddings(),
+            self.tokenizer_2,
+            tokens_2,
+            text_encoder_2_output,
+        )
+
         # apply dropout
         if text_encoder_1_dropout_probability is not None:
             dropout_text_encoder_1_mask = (torch.tensor(
@@ -274,7 +298,13 @@ class FluxModel(BaseModel):
 
         return text_encoder_2_output, pooled_text_encoder_1_output
 
-    def prepare_latent_image_ids(self, height, width, device, dtype):
+    def prepare_latent_image_ids(
+            self,
+            height: int,
+            width: int,
+            device: torch.device,
+            dtype: torch.dtype,
+    ) -> Tensor:
         latent_image_ids = torch.zeros(height // 2, width // 2, 3)
         latent_image_ids[..., 1] = latent_image_ids[..., 1] + torch.arange(height // 2)[:, None]
         latent_image_ids[..., 2] = latent_image_ids[..., 2] + torch.arange(width // 2)[None, :]
@@ -287,15 +317,16 @@ class FluxModel(BaseModel):
 
         return latent_image_ids.to(device=device, dtype=dtype)
 
-    def pack_latents(self, latents, batch_size, num_channels_latents, height, width):
-        latents = latents.view(batch_size, num_channels_latents, height // 2, 2, width // 2, 2)
+    def pack_latents(self, latents: Tensor) -> Tensor:
+        batch_size, channels, height, width = latents.shape
+        latents = latents.view(batch_size, channels, height // 2, 2, width // 2, 2)
         latents = latents.permute(0, 2, 4, 1, 3, 5)
-        latents = latents.reshape(batch_size, (height // 2) * (width // 2), num_channels_latents * 4)
+        latents = latents.reshape(batch_size, (height // 2) * (width // 2), channels * 4)
 
         return latents
 
-    def unpack_latents(self, latents, height, width):
-        batch_size, num_patches, channels = latents.shape
+    def unpack_latents(self, latents, height: int, width: int):
+        batch_size, _, channels = latents.shape
 
         height = height // 2
         width = width // 2
@@ -306,3 +337,16 @@ class FluxModel(BaseModel):
         latents = latents.reshape(batch_size, channels // (2 * 2), height * 2, width * 2)
 
         return latents
+
+    def calculate_timestep_shift(self, latent_width: int, latent_height: int):
+        base_seq_len = self.noise_scheduler.config.base_image_seq_len
+        max_seq_len = self.noise_scheduler.config.max_image_seq_len
+        base_shift = self.noise_scheduler.config.base_shift
+        max_shift = self.noise_scheduler.config.max_shift
+        patch_size = 2
+
+        image_seq_len = (latent_width // patch_size) * (latent_height // patch_size)
+        m = (max_shift - base_shift) / (max_seq_len - base_seq_len)
+        b = base_shift - m * base_seq_len
+        mu = image_seq_len * m + b
+        return math.exp(mu)

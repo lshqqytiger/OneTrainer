@@ -6,9 +6,10 @@ import json
 import os
 import pickle
 import threading
+import traceback
 from contextlib import suppress
 
-from modules.trainer.GenericTrainer import GenericTrainer
+from modules.util import create
 from modules.util.args.TrainArgs import TrainArgs
 from modules.util.callbacks.TrainCallbacks import TrainCallbacks
 from modules.util.commands.TrainCommands import TrainCommands
@@ -17,12 +18,17 @@ from modules.util.config.TrainConfig import TrainConfig
 
 
 def write_request(filename,name, *params):
-    with suppress(FileNotFoundError):
-        os.rename(filename,filename+'.write')
-    with open(filename+'.write', 'ab') as f:
-        pickle.dump(name,f)
-        pickle.dump(params,f)
-    os.rename(filename+'.write',filename)
+    try:
+        with suppress(FileNotFoundError):
+            os.rename(filename,filename+'.write')
+        with open(filename+'.write', 'ab') as f:
+            pickle.dump(name,f)
+            pickle.dump(params,f)
+        os.rename(filename+'.write',filename)
+    except Exception:
+        #TrainCallbacks is suppressing all exceptions; at least print them:
+        traceback.print_exc()
+        raise
 
 def close_pipe(filename):
     with open(filename, 'wb'): #send EOF by closing
@@ -40,17 +46,7 @@ def command_thread_function(commands: TrainCommands,filename : str,stop_event):
         except EOFError:
             continue
 
-        if remote_commands.get_stop_command():
-            commands.stop()
-        for entry in remote_commands.get_and_reset_sample_custom_commands():
-            commands.sample_custom(entry)
-        if remote_commands.get_and_reset_sample_default_command():
-            commands.sample_default()
-        if remote_commands.get_and_reset_backup_command():
-            commands.backup()
-        if remote_commands.get_and_reset_save_command():
-            commands.save()
-
+        commands.merge(remote_commands)
 
 
 def main():
@@ -71,6 +67,7 @@ def main():
     train_config = TrainConfig.default_values()
     with open(args.config_path, "r") as f:
         train_config.from_dict(json.load(f))
+    train_config.cloud.enabled=False
 
     try:
         with open("secrets.json" if args.secrets_path is None else args.secrets_path, "r") as f:
@@ -80,7 +77,7 @@ def main():
         if args.secrets_path is not None:
             raise
 
-    trainer = GenericTrainer(train_config, callbacks, commands)
+    trainer = create.create_trainer(train_config, callbacks, commands)
 
     if args.command_path:
         stop_event=threading.Event()

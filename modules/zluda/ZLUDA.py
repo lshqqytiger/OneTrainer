@@ -9,7 +9,7 @@ import onnxruntime as ort
 
 def is_zluda(device: DeviceLikeType):
     device = torch.device(device)
-    if device.type == "cpu":
+    if device.type in ["cpu", "mps"]:
         return False
     return torch.cuda.get_device_name(device).endswith("[ZLUDA]")
 

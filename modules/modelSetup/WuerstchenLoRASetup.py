@@ -2,23 +2,12 @@ from modules.model.WuerstchenModel import WuerstchenModel
 from modules.modelSetup.BaseWuerstchenSetup import BaseWuerstchenSetup
 from modules.module.LoRAModule import LoRAModuleWrapper
 from modules.util.config.TrainConfig import TrainConfig
-from modules.util.NamedParameterGroup import NamedParameterGroup, NamedParameterGroupCollection
+from modules.util.NamedParameterGroup import NamedParameterGroupCollection
 from modules.util.optimizer_util import init_model_parameters
 from modules.util.torch_util import state_dict_has_prefix
 from modules.util.TrainProgress import TrainProgress
 
 import torch
-
-# This is correct for the latest cascade, but other Wuerstchen models may have
-# different names. I honestly don't know what makes a good preset here so I'm
-# just guessing.
-PRESETS = {
-    "attn-only": ["attention"],
-    "full": [],
-    "down-blocks": ["down_blocks"],
-    "up-blocks": ["up_blocks"],
-    "mapper-only": ["mapper"],
-}
 
 
 class WuerstchenLoRASetup(
@@ -43,25 +32,15 @@ class WuerstchenLoRASetup(
     ) -> NamedParameterGroupCollection:
         parameter_group_collection = NamedParameterGroupCollection()
 
-        if config.text_encoder.train:
-            parameter_group_collection.add_group(NamedParameterGroup(
-                unique_name="prior_text_encoder_lora",
-                parameters=model.prior_text_encoder_lora.parameters(),
-                learning_rate=config.text_encoder.learning_rate,
-            ))
+        self._create_model_part_parameters(parameter_group_collection, "prior_text_encoder_lora", model.prior_text_encoder_lora, config.text_encoder)
 
-        if config.train_any_embedding():
+        if config.train_any_embedding() or config.train_any_output_embedding():
             self._add_embedding_param_groups(
-                model.prior_embedding_wrapper, parameter_group_collection, config.embedding_learning_rate,
+                model.all_prior_text_encoder_embeddings(), parameter_group_collection, config.embedding_learning_rate,
                 "prior_embeddings"
             )
 
-        if config.prior.train:
-            parameter_group_collection.add_group(NamedParameterGroup(
-                unique_name="prior_prior_lora",
-                parameters=model.prior_prior_lora.parameters(),
-                learning_rate=config.prior.learning_rate,
-            ))
+        self._create_model_part_parameters(parameter_group_collection, "prior_prior_lora", model.prior_prior_lora, config.prior)
 
         return parameter_group_collection
 
@@ -70,6 +49,7 @@ class WuerstchenLoRASetup(
             model: WuerstchenModel,
             config: TrainConfig,
     ):
+        self._setup_embeddings_requires_grad(model, config)
         model.prior_text_encoder.requires_grad_(False)
         model.prior_prior.requires_grad_(False)
         if model.model_type.is_wuerstchen_v2():
@@ -78,22 +58,8 @@ class WuerstchenLoRASetup(
         model.decoder_vqgan.requires_grad_(False)
         model.effnet_encoder.requires_grad_(False)
 
-        if model.prior_text_encoder_lora is not None:
-            train_text_encoder = config.text_encoder.train and \
-                                 not self.stop_text_encoder_training_elapsed(config, model.train_progress)
-            model.prior_text_encoder_lora.requires_grad_(train_text_encoder)
-
-        for i, embedding in enumerate(model.additional_embeddings):
-            embedding_config = config.additional_embeddings[i]
-            train_embedding = embedding_config.train and \
-                              not self.stop_additional_embedding_training_elapsed(embedding_config, model.train_progress, i)
-            embedding.prior_text_encoder_vector.requires_grad_(train_embedding)
-
-        if model.prior_prior_lora is not None:
-            train_unet = config.unet.train and \
-                         not self.stop_unet_training_elapsed(config, model.train_progress)
-            model.prior_prior_lora.requires_grad_(train_unet)
-
+        self._setup_model_part_requires_grad("prior_text_encoder_lora", model.prior_text_encoder_lora, config.text_encoder, model.train_progress)
+        self._setup_model_part_requires_grad("prior_prior_lora", model.prior_prior_lora, config.prior, model.train_progress)
 
     def setup_model(
             self,
@@ -109,7 +75,7 @@ class WuerstchenLoRASetup(
         ) if create_te else None
 
         model.prior_prior_lora = LoRAModuleWrapper(
-            model.prior_prior, "lora_prior_unet", config, config.lora_layers.split(",")
+            model.prior_prior, "lora_prior_unet", config, config.layer_filter.split(",")
         )
 
         if model.lora_state_dict:
@@ -129,7 +95,7 @@ class WuerstchenLoRASetup(
         model.prior_prior_lora.hook_to_module()
 
         self._remove_added_embeddings_from_tokenizer(model.prior_tokenizer)
-        self._setup_additional_embeddings(model, config)
+        self._setup_embeddings(model, config)
         self._setup_embedding_wrapper(model, config)
         self.__setup_requires_grad(model, config)
 
@@ -151,7 +117,6 @@ class WuerstchenLoRASetup(
         text_encoder_on_train_device = \
             config.text_encoder.train \
             or config.train_any_embedding() \
-            or config.align_prop \
             or not config.latent_caching
 
         model.prior_text_encoder_to(self.train_device if text_encoder_on_train_device else self.temp_device)
@@ -180,5 +145,6 @@ class WuerstchenLoRASetup(
             train_progress: TrainProgress
     ):
         if config.preserve_embedding_norm:
+            self._normalize_output_embeddings(model.all_prior_text_encoder_embeddings())
             model.prior_embedding_wrapper.normalize_embeddings()
         self.__setup_requires_grad(model, config)

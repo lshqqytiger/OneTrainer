@@ -46,10 +46,8 @@ class HunyuanVideoSampler(BaseModelSampler):
             diffusion_steps: int,
             cfg_scale: float,
             noise_scheduler: NoiseScheduler,
-            cfg_rescale: float = 0.7,
             text_encoder_1_layer_skip: int = 0,
             text_encoder_2_layer_skip: int = 0,
-            force_last_timestep: bool = False,
             prior_attention_mask: bool = False,
             on_update_progress: Callable[[int, int], None] = lambda _, __: None,
     ) -> ModelSamplerOutput:
@@ -74,7 +72,6 @@ class HunyuanVideoSampler(BaseModelSampler):
             prompt_embedding, pooled_prompt_embedding, prompt_attention_mask = self.model.encode_text(
                 text=prompt,
                 train_device=self.train_device,
-                batch_size=1,
                 text_encoder_1_layer_skip=text_encoder_1_layer_skip,
                 text_encoder_2_layer_skip=text_encoder_2_layer_skip,
             )
@@ -103,13 +100,6 @@ class HunyuanVideoSampler(BaseModelSampler):
                 device=self.train_device,
             )
             timesteps = noise_scheduler.timesteps
-
-            if force_last_timestep:
-                last_timestep = torch.ones(1, device=self.train_device, dtype=torch.int64) \
-                                * (noise_scheduler.config.num_train_timesteps - 1)
-
-                # add the final timestep to force predicting with zero snr
-                timesteps = torch.cat([last_timestep, timesteps])
 
             # denoising loop
             extra_step_kwargs = {}
@@ -192,12 +182,9 @@ class HunyuanVideoSampler(BaseModelSampler):
             on_sample: Callable[[ModelSamplerOutput], None] = lambda _: None,
             on_update_progress: Callable[[int, int], None] = lambda _, __: None,
     ):
-        prompt = self.model.add_embeddings_to_prompt(sample_config.prompt)
-        negative_prompt = self.model.add_embeddings_to_prompt(sample_config.negative_prompt)
-
         sampler_output = self.__sample_base(
-            prompt=prompt,
-            negative_prompt=negative_prompt,
+            prompt=sample_config.prompt,
+            negative_prompt=sample_config.negative_prompt,
             height=self.quantize_resolution(sample_config.height, 64),
             width=self.quantize_resolution(sample_config.width, 64),
             num_frames=self.quantize_resolution(sample_config.frames - 1, 4) + 1,
@@ -206,10 +193,8 @@ class HunyuanVideoSampler(BaseModelSampler):
             diffusion_steps=sample_config.diffusion_steps,
             cfg_scale=sample_config.cfg_scale,
             noise_scheduler=sample_config.noise_scheduler,
-            cfg_rescale=0.7 if sample_config.force_last_timestep else 0.0,
             text_encoder_1_layer_skip=sample_config.text_encoder_1_layer_skip,
             text_encoder_2_layer_skip=sample_config.text_encoder_2_layer_skip,
-            force_last_timestep=sample_config.force_last_timestep,
             prior_attention_mask=sample_config.prior_attention_mask,
             on_update_progress=on_update_progress,
         )

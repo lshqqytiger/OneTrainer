@@ -1,7 +1,11 @@
-from modules.modelSetup.mixin.ModelSetupNoiseMixin import ModelSetupNoiseMixin
+
+from modules.modelSetup.mixin.ModelSetupNoiseMixin import (
+    ModelSetupNoiseMixin,
+)
 from modules.util.config.TrainConfig import TrainConfig
 from modules.util.enum.TimestepDistribution import TimestepDistribution
 from modules.util.ui import components
+from modules.util.ui.ui_utils import set_window_icon
 from modules.util.ui.UIState import UIState
 
 import torch
@@ -22,6 +26,7 @@ class TimestepGenerator(ModelSetupNoiseMixin):
             max_noising_strength: float,
             noising_weight: float,
             noising_bias: float,
+            timestep_shift: float,
     ):
         super().__init__()
 
@@ -30,6 +35,7 @@ class TimestepGenerator(ModelSetupNoiseMixin):
         self.max_noising_strength = max_noising_strength
         self.noising_weight = noising_weight
         self.noising_bias = noising_bias
+        self.timestep_shift = timestep_shift
 
     def generate(self) -> Tensor:
         generator = torch.Generator()
@@ -41,6 +47,8 @@ class TimestepGenerator(ModelSetupNoiseMixin):
         config.max_noising_strength = self.max_noising_strength
         config.noising_weight = self.noising_weight
         config.noising_bias = self.noising_bias
+        config.timestep_shift = self.timestep_shift
+
 
         return self._get_timestep_discrete(
             num_train_timesteps=1000,
@@ -59,30 +67,29 @@ class TimestepDistributionWindow(ctk.CTkToplevel):
             ui_state: UIState,
             *args, **kwargs,
     ):
-        ctk.CTkToplevel.__init__(self, parent, *args, **kwargs)
-
-        self.config = config
-        self.ui_state = ui_state
-
-        self.image_preview_file_index = 0
+        super().__init__(parent, *args, **kwargs)
 
         self.title("Timestep Distribution")
         self.geometry("900x600")
         self.resizable(True, True)
-        self.wait_visibility()
-        self.grab_set()
-        self.focus_set()
+
+        self.config = config
+        self.ui_state = ui_state
+        self.image_preview_file_index = 0
+        self.ax = None
+        self.canvas = None
 
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        self.ax = None
-        self.canvas = None
-
         frame = self.__content_frame(self)
         frame.grid(row=0, column=0, sticky='nsew')
-
         components.button(self, 1, 0, "ok", self.__ok)
+
+        self.wait_visibility()
+        self.after(200, lambda: set_window_icon(self))
+        self.grab_set()
+        self.focus_set()
 
     def __content_frame(self, master):
         frame = ctk.CTkScrollableFrame(master, fg_color="transparent")
@@ -90,7 +97,7 @@ class TimestepDistributionWindow(ctk.CTkToplevel):
         frame.grid_columnconfigure(1, weight=0)
         frame.grid_columnconfigure(2, weight=0)
         frame.grid_columnconfigure(3, weight=1)
-        frame.grid_rowconfigure(5, weight=1)
+        frame.grid_rowconfigure(7, weight=1)
 
         # timestep distribution
         components.label(frame, 0, 0, "Timestep Distribution",
@@ -119,6 +126,17 @@ class TimestepDistributionWindow(ctk.CTkToplevel):
                          tooltip="Controls the bias parameter of the timestep distribution function. Use the preview to see more details.")
         components.entry(frame, 4, 1, self.ui_state, "noising_bias")
 
+        # timestep shift
+        components.label(frame, 5, 0, "Timestep Shift",
+                         tooltip="Shift the timestep distribution. Use the preview to see more details.")
+        components.entry(frame, 5, 1, self.ui_state, "timestep_shift")
+
+        # dynamic timestep shifting
+        components.label(frame, 6, 0, "Dynamic Timestep Shifting",
+                         tooltip="Dynamically shift the timestep distribution based on resolution. If enabled, the shifting parameters are taken from the model's scheduler configuration and Timestep Shift is ignored. Dynamic Timestep Shifting is not shown in the preview.")
+        components.switch(frame, 6, 1, self.ui_state, "dynamic_timestep_shifting")
+
+
         # plot
         appearance_mode = AppearanceModeTracker.get_mode()
         background_color = self.winfo_rgb(ThemeManager.theme["CTkToplevel"]["fg_color"][appearance_mode])
@@ -129,7 +147,7 @@ class TimestepDistributionWindow(ctk.CTkToplevel):
         fig, ax = plt.subplots()
         self.ax = ax
         self.canvas = FigureCanvasTkAgg(fig, master=frame)
-        self.canvas.get_tk_widget().grid(row=0, column=3, rowspan=6)
+        self.canvas.get_tk_widget().grid(row=0, column=3, rowspan=8)
 
         fig.set_facecolor(background_color)
         ax.set_facecolor(background_color)
@@ -145,7 +163,7 @@ class TimestepDistributionWindow(ctk.CTkToplevel):
         self.__update_preview()
 
         # update button
-        components.button(frame, 6, 3, "Update Preview", command=self.__update_preview)
+        components.button(frame, 8, 3, "Update Preview", command=self.__update_preview)
 
         frame.pack(fill="both", expand=1)
         return frame
@@ -157,6 +175,7 @@ class TimestepDistributionWindow(ctk.CTkToplevel):
             max_noising_strength=self.config.max_noising_strength,
             noising_weight=self.config.noising_weight,
             noising_bias=self.config.noising_bias,
+            timestep_shift=self.config.timestep_shift,
         )
 
         self.ax.cla()

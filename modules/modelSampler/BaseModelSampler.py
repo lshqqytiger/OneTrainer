@@ -1,3 +1,4 @@
+import io
 import os
 from abc import ABCMeta, abstractmethod
 from collections.abc import Callable
@@ -19,11 +20,32 @@ class ModelSamplerOutput:
     def __init__(
             self,
             file_type: FileType,
-            data: Image.Image | torch.Tensor,
+            data: Image.Image | torch.Tensor | bytes,
 
     ):
         self.file_type = file_type
-        self.data = data
+        if isinstance(data, bytes):
+            assert file_type == FileType.IMAGE
+            self.data = Image.open(io.BytesIO(data))
+        else:
+            self.data = data
+
+    #Reduce to a JPEG bytestream for cloud training:
+    def __reduce__(self):
+        match self.file_type:
+            case FileType.IMAGE:
+                b = io.BytesIO()
+                self.data.save(b, format='JPEG')
+                return ModelSamplerOutput, (self.file_type, b.getvalue())
+            case FileType.VIDEO:
+                #do not transfer videos; they are not shown anyway
+                #the video sample file is transferred via workspace sync
+                return ModelSamplerOutput, (self.file_type, None)
+            case FileType.AUDIO:
+                # TODO
+                return ModelSamplerOutput, (self.file_type, None)
+            case _:
+                return ModelSamplerOutput, (self.file_type, None)
 
 
 class BaseModelSampler(metaclass=ABCMeta):
