@@ -252,23 +252,31 @@ echo.
 echo %CYAN%Upgrading pip and installing dependencies from requirements.txt...%RESET%
 echo Executing: python -m pip install --upgrade pip
 python -m pip install --upgrade pip || call :die "pip upgrade failed"
-echo Executing: python -m pip install -r requirements.txt
-python -m pip install -r requirements.txt || call :die "Dependencies install failed"
+for /f "delims=" %%A in ('python -c "from scripts.detect_amdgpu import detect_amdgpu; print(detect_amdgpu(), end='')"') do (
+  if errorlevel 0 (
+    set "amdgpu=%%A"
+  )
+)
+if not defined amdgpu (
+  echo Executing: python -m pip install -r requirements.txt
+  python -m pip install -r requirements.txt || call :die "Dependencies install failed"
+) else (
+  echo An AMDGPU was found.
+  set /p "ans_amd=Do you want to install ROCm PyTorch? (y/n): "
+  if /i "!ans_amd!"=="y" (
+    echo Executing: python -m pip install torch torchvision --index-url https://rocm.nightlies.amd.com/v2-staging/%amdgpu%
+    python -m pip install torch torchvision --index-url https://rocm.nightlies.amd.com/v2-staging/%amdgpu% || call :die "Dependencies install failed"
+    echo Executing: python -m pip install -r requirements-global.txt
+    python -m pip install -r requirements-global.txt || call :die "Dependencies install failed"
+  )
+)
 
 rem 6) Check CUDA
 echo.
 echo %CYAN%Checking CUDA availability...%RESET%
 python -c "import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)"
 if errorlevel 1 (
-  echo %YEL%CUDA not found via torch.cuda.is_available.%RESET%
-  set "ans_amd="
-  set /p "ans_amd=AMD GPU? (y/n): "
-  if /i "!ans_amd!"=="y" (
-    echo Executing: python "%SCRIPT_DIR%\scripts\install_zluda.py"
-    python "%SCRIPT_DIR%\scripts\install_zluda.py" || call :die "ZLUDA install failed"
-  ) else (
     call :die "CUDA unavailable and not an AMD GPU setup - aborting. Please check PyTorch and NVIDIA driver compatibility."
-  )
 ) else (
     echo %GRN%CUDA is available.%RESET%
 )
